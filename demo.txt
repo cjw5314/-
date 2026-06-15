@@ -1,0 +1,471 @@
+# -*- coding: utf-8 -*-
+"""
+漂绿指标计算Demo脚本
+功能：计算单个文本文件的6个漂绿指标，并标注具体句子位置
+参考：SKILL.md漂绿分析工作流
+"""
+
+import re
+import pandas as pd
+import numpy as np
+from collections import Counter
+import os
+import sys
+
+# 设置输出编码
+sys.stdout.reconfigure(encoding='utf-8')
+
+class GreenwashingAnalyzer:
+    """漂绿分析器类"""
+    
+    def __init__(self):
+        """初始化字典"""
+        # 环保关键词基础库
+        self.env_keywords = [
+            '环境', '节能', '减排', '污染', '排放', '废气', '废水', '废渣',
+            '粉尘', '二氧化硫', '氮氧化物', 'COD', '氨氮', '烟尘', '固废',
+            '生态', '绿化', '植被', '水资源', '循环', '再利用', '清洁',
+            '绿色', '低碳', '碳排放', '碳达峰', '碳中和', '环保', '治理',
+            '可持续', '生态文明', '蓝天', '碧水', '净土', '清洁生产',
+            '余热', '余压', '发电', '脱硫', '脱硝', '除尘', '污水处理',
+            '二氧化硫', 'COD', '氨氮', '颗粒物', 'VOC', '挥发性有机物',
+            '环境影响', '环保设施', '达标排放', '清洁生产', '循环经济'
+        ]
+        
+        # 模糊表述词汇
+        self.vague_keywords = [
+            '积极', '努力', '大力', '不断', '持续', '显著', '有效', '显著',
+            '良好', '稳步', '大幅', '明显', '显著', '成效显著', '效果良好',
+            '持续改善', '不断提升', '稳步推进', '取得实效', '成效明显',
+            '有力', '扎实', '深入', '全面', '系统', '科学', '规范', '完善',
+            '优化', '提升', '加强', '强化', '健全', '提高', '增强', '巩固',
+            '高度重视', '积极推进', '大力开展', '不断完善', '持续优化'
+        ]
+        
+        # 正面宣传词汇
+        self.positive_keywords = [
+            '领先', '优秀', '卓越', '一流', '典范', '标杆', '模范', '先进',
+            '优秀', '突出', '显著', '优异', '良好', '优良', '最佳', '最优',
+            '领先水平', '国际先进', '国内领先', '行业一流', '世界级',
+            '首创', '独创', '领先', '引领', '示范', '标杆'
+        ]
+        
+        # 证据密度词汇
+        self.evidence_keywords = [
+            '投资', '投入', '资金', '费用', '支出', '成本', '预算', '拨款',
+            '项目', '工程', '设施', '设备', '系统', '装置', '机组', '平台',
+            '基地', '中心', '厂', '站', '处理', '净化', '监测', '检测',
+            '万元', '亿元', '万', '亿', '吨', '千瓦', '立方米', '千瓦时',
+            '投资额', '投资金额', '建设投资', '工程投资', '环保投资'
+        ]
+        
+        # 量化单位正则模式
+        self.quant_pattern = r'\d+(?:\.\d+)?\s*(?:[万亿千百]?吨|万千瓦时|%|万元|亿元|万|亿|千克|立方米|次|个|项|套|人|天|年|千瓦|兆瓦)'
+        
+        # 环保投入正则模式
+        self.investment_pattern = r'(?:环保投入|环境投资|环保支出|环保资金|环境治理投入)[^\d]*(\d+(?:\.\d+)?)\s*(?:万|亿)?元?'
+    
+    def load_file(self, file_path):
+        """加载文本文件"""
+        encodings = ['utf-8', 'gbk', 'utf-8-sig']
+        for encoding in encodings:
+            try:
+                with open(file_path, 'r', encoding=encoding) as f:
+                    return f.read()
+            except:
+                continue
+        raise Exception(f"无法读取文件: {file_path}")
+    
+    def split_sentences(self, text):
+        """将文本分割成句子"""
+        sentences = re.split(r'[。！？；\n]+', text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        return sentences
+    
+    def count_env_keywords(self, text):
+        """统计环保关键词出现次数"""
+        count = 0
+        positions = []
+        text_lower = text.lower()
+        for keyword in self.env_keywords:
+            pattern = re.escape(keyword)
+            matches = list(re.finditer(pattern, text_lower))
+            count += len(matches)
+            for match in matches:
+                positions.append({
+                    'keyword': keyword,
+                    'position': match.start(),
+                    'context': text[max(0, match.start()-20):match.end()+20]
+                })
+        return count, positions
+    
+    def count_vague_sentences(self, sentences):
+        """统计模糊表述句子"""
+        vague_sentences = []
+        for i, sentence in enumerate(sentences):
+            for keyword in self.vague_keywords:
+                if keyword in sentence:
+                    vague_sentences.append({
+                        'sentence_id': i + 1,
+                        'sentence': sentence[:100] + '...' if len(sentence) > 100 else sentence,
+                        'keyword': keyword,
+                        'position': sentence.find(keyword)
+                    })
+                    break
+        return vague_sentences
+    
+    def count_quant_sentences(self, sentences):
+        """统计量化披露句子"""
+        quant_sentences = []
+        for i, sentence in enumerate(sentences):
+            if re.search(self.quant_pattern, sentence):
+                quant_sentences.append({
+                    'sentence_id': i + 1,
+                    'sentence': sentence[:100] + '...' if len(sentence) > 100 else sentence,
+                    'matched_text': re.search(self.quant_pattern, sentence).group()
+                })
+        return quant_sentences
+    
+    def check_investment(self, text):
+        """检查环保投入披露"""
+        matches = list(re.finditer(self.investment_pattern, text))
+        if matches:
+            return 1, [{
+                'position': match.start(),
+                'context': text[max(0, match.start()-30):match.end()+30],
+                'amount': match.group(1)
+            } for match in matches]
+        return 0, []
+    
+    def count_positive_keywords(self, text):
+        """统计正面宣传词汇"""
+        count = 0
+        positions = []
+        for keyword in self.positive_keywords:
+            pattern = re.escape(keyword)
+            matches = list(re.finditer(pattern, text))
+            count += len(matches)
+            for match in matches:
+                positions.append({
+                    'keyword': keyword,
+                    'position': match.start(),
+                    'context': text[max(0, match.start()-20):match.end()+20]
+                })
+        return count, positions
+    
+    def count_evidence_keywords(self, text):
+        """统计证据密度词汇"""
+        count = 0
+        positions = []
+        for keyword in self.evidence_keywords:
+            pattern = re.escape(keyword)
+            matches = list(re.finditer(pattern, text))
+            count += len(matches)
+            for match in matches:
+                positions.append({
+                    'keyword': keyword,
+                    'position': match.start(),
+                    'context': text[max(0, match.start()-20):match.end()+20]
+                })
+        return count, positions
+    
+    def analyze_file(self, file_path, company_name=None, year=None, report_type=None):
+        """
+        分析单个文件，计算6个漂绿指标
+        """
+        print(f"\n{'='*60}")
+        print(f"正在分析文件: {os.path.basename(file_path)}")
+        print(f"{'='*60}")
+        
+        # 1. 加载文件
+        print("\n[步骤1] 加载文本文件...")
+        text = self.load_file(file_path)
+        total_chars = len(text)
+        print(f"  [OK] 文件加载成功，总字符数: {total_chars:,}")
+        
+        # 2. 分割句子
+        print("\n[步骤2] 分割句子...")
+        sentences = self.split_sentences(text)
+        total_sentences = len(sentences)
+        print(f"  [OK] 分割完成，总句子数: {total_sentences:,}")
+        
+        # 3. 计算环境关键词密度
+        print("\n[步骤3] 计算环境关键词密度...")
+        env_count, env_positions = self.count_env_keywords(text)
+        env_density = (env_count / total_chars) * 1000
+        print(f"  [OK] 环境关键词出现次数: {env_count}")
+        print(f"  [OK] 环境关键词密度: {env_density:.4f} per thousand")
+        if env_positions:
+            print(f"  [定位] 关键词[{env_positions[0]['keyword']}]位置: {env_positions[0]['position']}")
+            print(f"         上下文: {env_positions[0]['context']}")
+        
+        # 4. 计算模糊表述比例
+        print("\n[步骤4] 计算模糊表述比例...")
+        vague_sentences = self.count_vague_sentences(sentences)
+        vague_sent_ratio = len(vague_sentences) / total_sentences if total_sentences > 0 else 0
+        print(f"  [OK] 模糊表述句子数: {len(vague_sentences)}")
+        print(f"  [OK] 模糊表述比例: {vague_sent_ratio:.4f}")
+        if vague_sentences:
+            print(f"  [定位] 句子#{vague_sentences[0]['sentence_id']} 包含[{vague_sentences[0]['keyword']}]")
+            print(f"         {vague_sentences[0]['sentence']}")
+        
+        # 5. 计算量化披露比例
+        print("\n[步骤5] 计算量化披露比例...")
+        quant_sentences = self.count_quant_sentences(sentences)
+        quant_sent_ratio = len(quant_sentences) / total_sentences if total_sentences > 0 else 0
+        print(f"  [OK] 量化披露句子数: {len(quant_sentences)}")
+        print(f"  [OK] 量化披露比例: {quant_sent_ratio:.4f}")
+        if quant_sentences:
+            print(f"  [定位] 句子#{quant_sentences[0]['sentence_id']} 包含[{quant_sentences[0]['matched_text']}]")
+            print(f"         {quant_sentences[0]['sentence']}")
+        
+        # 6. 检查环保投入披露
+        print("\n[步骤6] 检查环保投入披露...")
+        has_investment, investment_matches = self.check_investment(text)
+        print(f"  [OK] 是否有环保投入披露: {'是' if has_investment else '否'}")
+        if investment_matches:
+            print(f"  [定位] 位置: {investment_matches[0]['position']}")
+            print(f"         上下文: {investment_matches[0]['context']}")
+            print(f"         金额: {investment_matches[0]['amount']}万元/亿元")
+        
+        # 7. 计算正面宣传强度
+        print("\n[步骤7] 计算正面宣传强度...")
+        positive_count, positive_positions = self.count_positive_keywords(text)
+        positive_intensity = (positive_count / total_chars) * 1000
+        print(f"  [OK] 正面宣传词汇出现次数: {positive_count}")
+        print(f"  [OK] 正面宣传强度: {positive_intensity:.4f} per thousand")
+        if positive_positions:
+            print(f"  [定位] 关键词[{positive_positions[0]['keyword']}]位置: {positive_positions[0]['position']}")
+            print(f"         上下文: {positive_positions[0]['context']}")
+        
+        # 8. 计算证据密度
+        print("\n[步骤8] 计算证据密度...")
+        evidence_count, evidence_positions = self.count_evidence_keywords(text)
+        estimated_pages = total_chars / 500
+        evidence_per_page = evidence_count / estimated_pages if estimated_pages > 0 else 0
+        print(f"  [OK] 证据词汇出现次数: {evidence_count}")
+        print(f"  [OK] 估算页数: {estimated_pages:.1f}页")
+        print(f"  [OK] 证据密度: {evidence_per_page:.4f} per page")
+        if evidence_positions:
+            print(f"  [定位] 关键词[{evidence_positions[0]['keyword']}]位置: {evidence_positions[0]['position']}")
+            print(f"         上下文: {evidence_positions[0]['context']}")
+        
+        # 汇总结果
+        results = {
+            'company': company_name or '未知',
+            'year': year or '未知',
+            'report_type': report_type or '未知',
+            'total_chars': total_chars,
+            'total_sentences': total_sentences,
+            'env_density': round(env_density, 4),
+            'vague_sent_ratio': round(vague_sent_ratio, 4),
+            'quant_sent_ratio': round(quant_sent_ratio, 4),
+            'has_investment': has_investment,
+            'positive_intensity': round(positive_intensity, 4),
+            'evidence_per_page': round(evidence_per_page, 4),
+            'details': {
+                'env_keywords': {'count': env_count, 'density': env_density, 'positions': env_positions[:10]},
+                'vague_sentences': {'count': len(vague_sentences), 'ratio': vague_sent_ratio, 'examples': vague_sentences[:10]},
+                'quant_sentences': {'count': len(quant_sentences), 'ratio': quant_sent_ratio, 'examples': quant_sentences[:10]},
+                'investment': {'has_investment': has_investment, 'matches': investment_matches},
+                'positive_keywords': {'count': positive_count, 'intensity': positive_intensity, 'positions': positive_positions[:10]},
+                'evidence_keywords': {'count': evidence_count, 'per_page': evidence_per_page, 'positions': evidence_positions[:10]}
+            }
+        }
+        
+        return results
+    
+    def print_summary(self, results):
+        """打印结果汇总"""
+        print(f"\n{'='*60}")
+        print("6个漂绿指标计算结果汇总")
+        print(f"{'='*60}")
+        print(f"公司: {results['company']}")
+        print(f"年份: {results['year']}")
+        print(f"报告类型: {results['report_type']}")
+        print(f"\n总字符数: {results['total_chars']:,}")
+        print(f"总句子数: {results['total_sentences']:,}")
+        print(f"\n{'指标':<25} {'值':<15} {'说明'}")
+        print("-" * 60)
+        print(f"{'环境关键词密度':<20} {results['env_density']:.4f}      环保词汇密度")
+        print(f"{'模糊表述比例':<20} {results['vague_sent_ratio']:.4f}      模糊表述占比(高=风险大)")
+        print(f"{'量化披露比例':<20} {results['quant_sent_ratio']:.4f}      量化表述占比(高=披露具体)")
+        print(f"{'环保投入披露':<20} {results['has_investment']}           是否有具体投入金额")
+        print(f"{'正面宣传强度':<20} {results['positive_intensity']:.4f}      正面词汇密度")
+        print(f"{'证据密度':<20} {results['evidence_per_page']:.4f}/页    每页证据词数")
+        
+        # 漂绿风险评估
+        print(f"\n{'='*60}")
+        print("漂绿风险初步评估")
+        print(f"{'='*60}")
+        
+        risk_factors = []
+        protective_factors = []
+        
+        if results['vague_sent_ratio'] > 0.3:
+            risk_factors.append("模糊表述比例较高")
+        if results['quant_sent_ratio'] < 0.1:
+            risk_factors.append("量化披露不足")
+        if results['has_investment'] == 0:
+            risk_factors.append("未披露具体环保投入")
+        if results['evidence_per_page'] < 5:
+            risk_factors.append("证据密度偏低")
+        
+        if results['quant_sent_ratio'] > 0.15:
+            protective_factors.append("量化披露较为充分")
+        if results['has_investment'] == 1:
+            protective_factors.append("有具体环保投入数据")
+        if results['evidence_per_page'] > 10:
+            protective_factors.append("证据密度良好")
+        
+        print("\n风险因素:")
+        if risk_factors:
+            for factor in risk_factors:
+                print(f"  [!] {factor}")
+        else:
+            print("  [v] 未发现明显风险因素")
+        
+        print("\n积极因素:")
+        if protective_factors:
+            for factor in protective_factors:
+                print(f"  [v] {factor}")
+        else:
+            print("  [!] 未发现明显积极因素")
+        
+        # 综合评分
+        risk_score = 0
+        if results['vague_sent_ratio'] > 0.3:
+            risk_score += 2
+        if results['quant_sent_ratio'] < 0.1:
+            risk_score += 2
+        if results['has_investment'] == 0:
+            risk_score += 1
+        if results['evidence_per_page'] < 5:
+            risk_score += 1
+        
+        if risk_score >= 4:
+            risk_level = "高风险"
+        elif risk_score >= 2:
+            risk_level = "中风险"
+        else:
+            risk_level = "低风险"
+        
+        print(f"\n综合漂绿风险等级: {risk_level} (评分: {risk_score}/6)")
+        
+    def save_results(self, results, output_path):
+        """保存结果到CSV"""
+        main_data = {
+            '公司': [results['company']],
+            '年份': [results['year']],
+            '报告类型': [results['report_type']],
+            '总字符数': [results['total_chars']],
+            '总句子数': [results['total_sentences']],
+            'env_density': [results['env_density']],
+            'vague_sent_ratio': [results['vague_sent_ratio']],
+            'quant_sent_ratio': [results['quant_sent_ratio']],
+            'has_investment': [results['has_investment']],
+            'positive_intensity': [results['positive_intensity']],
+            'evidence_per_page': [results['evidence_per_page']]
+        }
+        df_main = pd.DataFrame(main_data)
+        df_main.to_csv(output_path, index=False, encoding='utf-8-sig')
+        print(f"\n[OK] 主结果已保存: {output_path}")
+        
+        # 保存详细定位
+        detailed_records = []
+        
+        for pos in results['details']['env_keywords']['positions']:
+            detailed_records.append({
+                '类型': '环境关键词',
+                '关键词': pos['keyword'],
+                '位置': pos['position'],
+                '上下文': pos['context']
+            })
+        
+        for sent in results['details']['vague_sentences']['examples']:
+            detailed_records.append({
+                '类型': '模糊表述',
+                '关键词': sent['keyword'],
+                '句子编号': sent['sentence_id'],
+                '句子内容': sent['sentence']
+            })
+        
+        for sent in results['details']['quant_sentences']['examples']:
+            detailed_records.append({
+                '类型': '量化披露',
+                '匹配文本': sent['matched_text'],
+                '句子编号': sent['sentence_id'],
+                '句子内容': sent['sentence']
+            })
+        
+        for match in results['details']['investment']['matches']:
+            detailed_records.append({
+                '类型': '环保投入',
+                '位置': match['position'],
+                '金额': match['amount'],
+                '上下文': match['context']
+            })
+        
+        if detailed_records:
+            df_detailed = pd.DataFrame(detailed_records)
+            detailed_path = output_path.replace('.csv', '_详细定位.csv')
+            df_detailed.to_csv(detailed_path, index=False, encoding='utf-8-sig')
+            print(f"[OK] 详细定位已保存: {detailed_path}")
+
+
+def main():
+    """主函数"""
+    print("=" * 60)
+    print("漂绿指标计算Demo - 完整版")
+    print("参考: SKILL.md 漂绿分析工作流")
+    print("=" * 60)
+    
+    # 初始化分析器
+    analyzer = GreenwashingAnalyzer()
+    
+    # 要分析的文件路径
+    file_path = r"G:\cjw数据挖掘\000709_2023_年报.txt"
+    
+    # 检查文件是否存在
+    if not os.path.exists(file_path):
+        print(f"\n错误: 文件不存在 - {file_path}")
+        dir_path = os.path.dirname(file_path)
+        if os.path.exists(dir_path):
+            print(f"\n目录 {dir_path} 中的文件:")
+            for f in os.listdir(dir_path):
+                if f.endswith('.txt'):
+                    print(f"  - {f}")
+        return
+    
+    # 从文件名提取信息
+    filename = os.path.basename(file_path)
+    parts = filename.replace('.txt', '').split('_')
+    
+    company_name = "河钢股份"
+    year = int(parts[1]) if len(parts) > 1 else 2023
+    report_type = parts[2] if len(parts) > 2 else "年报"
+    
+    # 分析文件
+    results = analyzer.analyze_file(
+        file_path,
+        company_name=company_name,
+        year=year,
+        report_type=report_type
+    )
+    
+    # 打印汇总
+    analyzer.print_summary(results)
+    
+    # 保存结果
+    output_path = r"G:\cjw数据挖掘\000709_2023_年报_漂绿指标.csv"
+    analyzer.save_results(results, output_path)
+    
+    print(f"\n{'='*60}")
+    print("分析完成！")
+    print(f"{'='*60}")
+    
+    return results
+
+
+if __name__ == "__main__":
+    results = main()
